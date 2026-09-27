@@ -10,6 +10,10 @@ services:
         value: 3.12.0
       - key: DISCORD_TOKEN
         sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: MISTRAL_MODEL
+        value: mistral-small-latest
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL

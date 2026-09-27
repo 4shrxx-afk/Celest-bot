@@ -49,10 +49,12 @@ Render deploys from a Git repo. Easiest way (no git needed locally):
 
    | Key | Value |
    | --- | --- |
-   | `DISCORD_TOKEN` | your bot token |
-   | `GROQ_API_KEY` | free key from console.groq.com/keys (primary AI, 1000/day) |
+   | `DISCORD_TOKEN` | your NEW bot token (you reset it — old one is dead) |
+   | `MISTRAL_API_KEY` | key from console.mistral.ai (Free plan: $10/mo API credits) |
+   | `MISTRAL_MODEL` | `mistral-small-latest` |
+   | `GROQ_API_KEY` | free key from console.groq.com/keys (1000/day) |
    | `GROQ_MODEL` | `qwen/qwen3.8-27b` |
-   | `OPENROUTER_API_KEY` | your `sk-or-…` key (automatic fallback, 50/day) |
+   | `OPENROUTER_API_KEY` | your fresh `sk-or-…` key (fallback, 50/day, handles images) |
    | `OPENROUTER_MODEL` | `openrouter/free` |
    | `OWNER_ID` | your Discord user id (locks every command to you) |
    | `PYTHON_VERSION` | `3.12.0` |

@@ -1,6 +1,6 @@
 # Celestial Bot
 
-Celestial — a Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via **Groq** (primary, free: 30/min · 1000/day) with **OpenRouter** as automatic fallback.
+Celestial — a Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via **Mistral → OpenRouter → Groq** automatic failover chain.
 
 ## Commands
 
@@ -24,9 +24,9 @@ Celestial — a Discord bot written in Python with [discord.py](https://discordp
 | `!aicode <request>` | She writes discord.py code, delivered as a file |
 | `!applysetup [#channel]` | Staff applications: button + form + accept/deny |
 | `!ping` / `!hello` / `!echo text` | Basics |
-| `!model` | Show both provider models |
-| `!model <groq-id>` | Switch Groq primary (e.g. `openai/gpt-oss-20b`) |
-| `!model openrouter <id>` | Switch OpenRouter fallback |
+| `!model` | Show all three provider models |
+| `!model <mistral-id>` | Switch Mistral primary (e.g. `mistral-medium-latest`) |
+| `!model openrouter\|groq <id>` | Switch that chain link |
 
 Owner toolkit (needs `OWNER_ID`, see below):
 

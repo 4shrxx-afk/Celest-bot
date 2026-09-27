@@ -52,8 +52,10 @@ threading.Thread(target=start_web_server, daemon=True).start()
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODEL = "openrouter/free"  # OpenRouter fallback - free models only, costs 0
-DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"  # Groq primary (free: 30/min, 1000/day)
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+DEFAULT_MODEL = "openrouter/free"  # OpenRouter - free models only, costs 0
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"  # Groq (free: 30/min, 1000/day)
+DEFAULT_MISTRAL_MODEL = "mistral-small-latest"  # Mistral primary (pay-as-you-go, cheap)
 
 SYSTEM_PROMPT = (
     "You are Celestial, a friendly Discord bot living in the users' server. "
@@ -132,9 +134,10 @@ intents.members = True  # needs Server Members Intent in the Developer Portal
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Current models. Swappable at runtime with !model (resets on restart).
-current_model = env("OPENROUTER_MODEL") or DEFAULT_MODEL  # fallback provider
-groq_model = env("GROQ_MODEL") or DEFAULT_GROQ_MODEL      # primary provider
-last_provider = "openrouter"
+current_model = env("OPENROUTER_MODEL") or DEFAULT_MODEL  # middle provider
+groq_model = env("GROQ_MODEL") or DEFAULT_GROQ_MODEL      # last provider
+mistral_model = env("MISTRAL_MODEL") or DEFAULT_MISTRAL_MODEL  # primary provider
+last_provider = "mistral"
 
 # Conversational memory shared by !ai and !chat: (guild_id, user_id) -> last turns.
 # In-memory only: a restart/redeploy wipes it (use !forget for a manual reset).
@@ -267,36 +270,47 @@ def _trim_for_groq(messages: list) -> list:
     return out
 
 
-RETRYABLE = {0, 429, 500, 502, 503, 529}
+RETRYABLE = {0, 401, 402, 403, 429, 500, 502, 503, 529}
 
 
 async def post_chat(session: aiohttp.ClientSession, messages: list,
                     user: str, max_tokens: int = 700,
                     temperature: float = 0.7):
-    """Groq first, OpenRouter fallback. Returns (http_status, payload)."""
+    """Mistral -> OpenRouter -> Groq. Returns (http_status, payload)."""
     global last_provider
     images = _has_images(messages)
-    # Images need OpenRouter - free Groq chat models are text-only.
-    if images and not env("OPENROUTER_API_KEY"):
-        last_provider = "groq"
-        return 400, {"error": {"message": "Image requests need OPENROUTER_API_KEY (Groq free models are text-only)."}}
-    groq_tried = False
-    # Primary: Groq (text only - free Groq chat models don't take images).
+    tried = []
+    # 1) Mistral primary (text only for now - images go straight to OpenRouter).
+    if env("MISTRAL_API_KEY") and not images:
+        last_provider = "mistral"
+        status, payload = await _post_once(session, MISTRAL_URL, env("MISTRAL_API_KEY"), mistral_model,
+                                           messages, max_tokens, temperature)
+        tried.append((status, payload))
+        if status == 200 or status not in RETRYABLE:
+            return status, payload
+    # 2) OpenRouter (handles images too).
+    if env("OPENROUTER_API_KEY"):
+        last_provider = "openrouter"
+        status, payload = await _post_once(session, OPENROUTER_URL, env("OPENROUTER_API_KEY"), current_model,
+                                           messages, max_tokens, temperature,
+                                           extra_headers={"X-Title": "Celestial Bot"}, user_hash=user)
+        tried.append((status, payload))
+        if status == 200 or status not in RETRYABLE:
+            return status, payload
+    # 3) Groq last (text only).
     if env("GROQ_API_KEY") and not images:
-        groq_tried = True
         last_provider = "groq"
         status, payload = await _post_once(session, GROQ_URL, env("GROQ_API_KEY"), groq_model,
                                            _trim_for_groq(messages), max_tokens, temperature)
+        tried.append((status, payload))
         if status == 200 or status not in RETRYABLE:
             return status, payload
-    # Fallback: OpenRouter.
-    if env("OPENROUTER_API_KEY"):
-        last_provider = "openrouter"
-        return await _post_once(session, OPENROUTER_URL, env("OPENROUTER_API_KEY"), current_model,
-                                messages, max_tokens, temperature,
-                                extra_headers={"X-Title": "Celestial Bot"}, user_hash=user)
-    if groq_tried:
-        return status, payload
+    # Images without OpenRouter key:
+    if images and not env("OPENROUTER_API_KEY"):
+        last_provider = "mistral" if env("MISTRAL_API_KEY") else "groq"
+        return 400, {"error": {"message": "Image requests need OPENROUTER_API_KEY."}}
+    if tried:
+        return tried[-1]
     return 0, {"error": {"message": "No AI provider key configured."}}
 
 
@@ -316,7 +330,7 @@ def error_message(status: int, payload: dict) -> str:
     if status == 402:
         return "Out of OpenRouter credits/quota for this model."
     if status == 404:
-        model = groq_model if last_provider == "groq" else current_model
+        model = {"mistral": mistral_model, "groq": groq_model}.get(last_provider, current_model)
         return f"Model `{model}` not found{who}. Check `!model` for the current id."
     if status == 429:
         return ("Rate limited on all configured providers. Wait a minute - "
@@ -333,13 +347,14 @@ async def send_long(ctx: commands.Context, text: str):
 
 
 def need_key(ctx: commands.Context) -> bool:
-    return not (env("GROQ_API_KEY") or env("OPENROUTER_API_KEY"))
+    return not (env("MISTRAL_API_KEY") or env("GROQ_API_KEY") or env("OPENROUTER_API_KEY"))
 
 
 async def no_key_msg(ctx: commands.Context):
     await ctx.send(
-        "No AI provider key set - add `GROQ_API_KEY` (free at console.groq.com/keys) "
-        "and/or `OPENROUTER_API_KEY` under Render Dashboard -> Environment."
+        "No AI provider key set - add at least one under Render Dashboard -> Environment: "
+        "`MISTRAL_API_KEY` (console.mistral.ai), `GROQ_API_KEY` (free at console.groq.com/keys), "
+        "`OPENROUTER_API_KEY` (openrouter.ai/keys)."
     )
 
 
@@ -808,7 +823,7 @@ async def _maybe_action(ctx: commands.Context, text: str) -> bool:
 # -------------------------------------------------------------------- commands
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} | servers: {len(bot.guilds)} | groq: {groq_model} | openrouter: {current_model}")
+    print(f"Logged in as {bot.user} | servers: {len(bot.guilds)} | mistral: {mistral_model} | openrouter: {current_model} | groq: {groq_model}")
     print(f"Owner lock: {sorted(get_owner_ids())}")
     print("------")
     try:
@@ -1827,18 +1842,21 @@ async def setavatar_cmd(ctx: commands.Context, image: discord.Attachment = None)
 
 @bot.hybrid_command(name="model", description="Show or change AI models")
 async def model(ctx: commands.Context, *, new_model: str = None):
-    """Show models. Usage: !model | !model <groq-id> | !model openrouter <id>"""
-    global current_model, groq_model
+    """Show models. Usage: !model | !model <mistral-id> | !model openrouter|groq <id>"""
+    global current_model, groq_model, mistral_model
     if new_model is None:
-        await ctx.send(f"Primary (Groq): `{groq_model}`\nFallback (OpenRouter): `{current_model}`")
+        await ctx.send(f"Primary (Mistral): `{mistral_model}`\nMiddle (OpenRouter): `{current_model}`\nLast (Groq): `{groq_model}`")
         return
     parts = new_model.split(None, 1)
     if parts[0].lower() == "openrouter" and len(parts) == 2:
         current_model = parts[1].strip()
-        await ctx.send(f"OpenRouter fallback set to `{current_model}` (resets on restart).")
+        await ctx.send(f"OpenRouter set to `{current_model}` (resets on restart).")
+    elif parts[0].lower() == "groq" and len(parts) == 2:
+        groq_model = parts[1].strip()
+        await ctx.send(f"Groq set to `{groq_model}` (resets on restart).")
     else:
-        groq_model = new_model.strip()
-        await ctx.send(f"Groq primary set to `{groq_model}` (resets on restart).")
+        mistral_model = new_model.strip()
+        await ctx.send(f"Mistral primary set to `{mistral_model}` (resets on restart).")
 
 
 @model.error
