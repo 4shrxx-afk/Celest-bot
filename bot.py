@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import io
 import json
 import os
 import re
@@ -50,7 +51,9 @@ def start_web_server():
 threading.Thread(target=start_web_server, daemon=True).start()
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openrouter/free"  # free models only - costs 0
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_MODEL = "openrouter/free"  # OpenRouter fallback - free models only, costs 0
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"  # Groq primary (free: 30/min, 1000/day)
 
 SYSTEM_PROMPT = (
     "You are Celestial, a friendly Discord bot living in the users' server. "
@@ -60,6 +63,8 @@ SYSTEM_PROMPT = (
     "Answer clearly and keep replies short - a few sentences max, no markdown headers, "
     "unless the user asks for something long. "
     "Reply in the language the user wrote in. "
+    "You remember this conversation - follow-ups like 'why', 'more', 'again', "
+    "'what about him' refer to what was just said. "
     "If the user attaches an image, look at it and describe or answer about what you see. "
     "If the user asks about this server, use the server context you were given. "
     "If anyone asks what model you are, always answer: you are Celestial, a custom model "
@@ -69,9 +74,12 @@ SYSTEM_PROMPT = (
     "!timeout @user 10m [reason], !untimeout @user, !slowmode <seconds|off>, "
     "!lock / !unlock, !announce #channel Title | text, !clear <1-30>, "
     "!aishout <draft> (polished @everyone post), !notify add hi, help (DM you on keywords), "
-    "!aiembed <idea> (you design an embed), !summarize [n]. "
+    "!aiembed <idea> (you design an embed), !summarize [n], "
+    "!aicode <request> (you write discord.py code, delivered as a file), "
+    "!applysetup #channel (staff applications with button + form). "
     "If the owner asks in plain words, you DO it yourself (rename, timeout, slowmode, "
-    "lock, announce, embed, summarize, remind). Only for message deletes, "
+    "lock, announce, embed, summarize, remind). For code requests, tell them "
+    "to use !aicode <request>. Only for message deletes, "
     "give the exact !clear command instead."
 )
 
@@ -84,6 +92,17 @@ EMBED_JSON_PROMPT = (
     '"fields": [{"name": "🎯 short name", "value": "short text", "inline": false}]} '
     "Fields are optional, max 4, each short. Keep everything tight and readable. "
     "Reply in the language the user wrote in."
+)
+
+
+CODE_SYSTEM_PROMPT = (
+    "You are Celestial Code, an expert discord.py v2 (2.x) Python programmer. "
+    "Write complete, working, copy-paste-ready code for the user's request. "
+    "Assume `discord`, `discord.ext.commands`, a `bot` object and asyncio already exist - "
+    "only write the new part unless asked otherwise. "
+    "Reply format: FIRST one single ```python fenced code block with ALL the code, "
+    "THEN a short explanation (setup steps, permissions needed, how to use). "
+    "Keep code clean, lightly commented, no placeholders, no truncated sections."
 )
 
 
@@ -112,11 +131,29 @@ intents.members = True  # needs Server Members Intent in the Developer Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Current model. Can be swapped at runtime with !model <id>
-current_model = env("OPENROUTER_MODEL") or DEFAULT_MODEL
+# Current models. Swappable at runtime with !model (resets on restart).
+current_model = env("OPENROUTER_MODEL") or DEFAULT_MODEL  # fallback provider
+groq_model = env("GROQ_MODEL") or DEFAULT_GROQ_MODEL      # primary provider
+last_provider = "openrouter"
 
-# Conversational memory for !chat: (guild_id, user_id) -> last 8 turns
+# Conversational memory shared by !ai and !chat: (guild_id, user_id) -> last turns.
+# In-memory only: a restart/redeploy wipes it (use !forget for a manual reset).
 chat_history: dict = {}
+HISTORY_MAX = 16  # messages (user + assistant) ≈ last 8 exchanges
+
+
+def _history_key(ctx: commands.Context):
+    return (ctx.guild.id if ctx.guild else 0, ctx.author.id)
+
+
+def _get_history(ctx: commands.Context):
+    return chat_history.setdefault(_history_key(ctx), deque(maxlen=HISTORY_MAX))
+
+
+def _remember(ctx: commands.Context, user_text: str, reply: str):
+    h = _get_history(ctx)
+    h.append({"role": "user", "content": (user_text or "")[:1500]})
+    h.append({"role": "assistant", "content": (reply or "")[:1500]})
 
 
 # ---------------------------------------------------------------- owner lock
@@ -184,32 +221,83 @@ def server_context(ctx: commands.Context) -> str:
     )
 
 
-async def post_chat(session: aiohttp.ClientSession, messages: list,
-                    user: str, max_tokens: int = 700,
-                    temperature: float = 0.7):
-    """POST a message list to OpenRouter. Returns (http_status, payload)."""
-    headers = {
-        "Authorization": f"Bearer {env('OPENROUTER_API_KEY')}",
-        "Content-Type": "application/json",
-        "X-Title": "Celestial Bot",
-    }
-    body = {
-        "model": current_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "user": user,
-    }
+async def _post_once(session: aiohttp.ClientSession, url: str, key: str, model: str,
+                     messages: list, max_tokens: int, temperature: float,
+                     extra_headers: dict = None, user_hash: str = None):
+    """One OpenAI-compatible chat request. Returns (http_status, payload)."""
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    body = {"model": model, "messages": messages,
+            "max_tokens": max_tokens, "temperature": temperature}
+    if user_hash is not None:
+        body["user"] = user_hash
     try:
         async with session.post(
-            OPENROUTER_URL, json=body, headers=headers,
+            url, json=body, headers=headers,
             timeout=aiohttp.ClientTimeout(total=60),
         ) as resp:
             return resp.status, await resp.json(content_type=None)
     except aiohttp.ClientError:
-        return 0, {"error": {"message": "Could not reach OpenRouter (network error)."}}
+        return 0, {"error": {"message": "Network error reaching the AI provider."}}
     except TimeoutError:
-        return 0, {"error": {"message": "OpenRouter took too long to reply."}}
+        return 0, {"error": {"message": "The AI provider took too long to reply."}}
+
+
+def _has_images(messages: list) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
+def _trim_for_groq(messages: list) -> list:
+    """Groq free caps at 8K tokens/min - keep the payload small."""
+    if not messages:
+        return messages
+    out = [messages[0]]
+    for m in messages[1:][-10:]:
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > 1200:
+            m = {**m, "content": c[:1200]}
+        out.append(m)
+    return out
+
+
+RETRYABLE = {0, 429, 500, 502, 503, 529}
+
+
+async def post_chat(session: aiohttp.ClientSession, messages: list,
+                    user: str, max_tokens: int = 700,
+                    temperature: float = 0.7):
+    """Groq first, OpenRouter fallback. Returns (http_status, payload)."""
+    global last_provider
+    images = _has_images(messages)
+    # Images need OpenRouter - free Groq chat models are text-only.
+    if images and not env("OPENROUTER_API_KEY"):
+        last_provider = "groq"
+        return 400, {"error": {"message": "Image requests need OPENROUTER_API_KEY (Groq free models are text-only)."}}
+    groq_tried = False
+    # Primary: Groq (text only - free Groq chat models don't take images).
+    if env("GROQ_API_KEY") and not images:
+        groq_tried = True
+        last_provider = "groq"
+        status, payload = await _post_once(session, GROQ_URL, env("GROQ_API_KEY"), groq_model,
+                                           _trim_for_groq(messages), max_tokens, temperature)
+        if status == 200 or status not in RETRYABLE:
+            return status, payload
+    # Fallback: OpenRouter.
+    if env("OPENROUTER_API_KEY"):
+        last_provider = "openrouter"
+        return await _post_once(session, OPENROUTER_URL, env("OPENROUTER_API_KEY"), current_model,
+                                messages, max_tokens, temperature,
+                                extra_headers={"X-Title": "Celestial Bot"}, user_hash=user)
+    if groq_tried:
+        return status, payload
+    return 0, {"error": {"message": "No AI provider key configured."}}
 
 
 def extract_reply(payload: dict):
@@ -222,15 +310,20 @@ def extract_reply(payload: dict):
 
 def error_message(status: int, payload: dict) -> str:
     msg = (payload.get("error") or {}).get("message") or "Unknown error."
+    who = f" [{last_provider}]" if last_provider else ""
     if status == 401:
-        return "OpenRouter rejected the API key. Check `OPENROUTER_API_KEY`."
+        return f"AI provider rejected the API key{who}. Check it in Render -> Environment."
     if status == 402:
         return "Out of OpenRouter credits/quota for this model."
     if status == 404:
-        return f"Model `{current_model}` was not found. Try `!model openrouter/free`."
+        model = groq_model if last_provider == "groq" else current_model
+        return f"Model `{model}` not found{who}. Check `!model` for the current id."
     if status == 429:
-        return "Rate limited by OpenRouter (free tier is strict). Try again in a minute."
-    return f"OpenRouter error ({status}): {msg}"
+        return ("Rate limited on all configured providers. Wait a minute - "
+                "quotas reset at midnight UTC.")
+    if status == 0:
+        return f"AI provider unreachable{who}: {msg}"
+    return f"AI error{who} ({status}): {msg}"
 
 
 async def send_long(ctx: commands.Context, text: str):
@@ -240,13 +333,13 @@ async def send_long(ctx: commands.Context, text: str):
 
 
 def need_key(ctx: commands.Context) -> bool:
-    return not env("OPENROUTER_API_KEY")
+    return not (env("GROQ_API_KEY") or env("OPENROUTER_API_KEY"))
 
 
 async def no_key_msg(ctx: commands.Context):
     await ctx.send(
-        "`OPENROUTER_API_KEY` is not set - add it under Render "
-        "Dashboard -> Environment (get a free key at openrouter.ai/keys)."
+        "No AI provider key set - add `GROQ_API_KEY` (free at console.groq.com/keys) "
+        "and/or `OPENROUTER_API_KEY` under Render Dashboard -> Environment."
     )
 
 
@@ -715,7 +808,7 @@ async def _maybe_action(ctx: commands.Context, text: str) -> bool:
 # -------------------------------------------------------------------- commands
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} | servers: {len(bot.guilds)} | model: {current_model}")
+    print(f"Logged in as {bot.user} | servers: {len(bot.guilds)} | groq: {groq_model} | openrouter: {current_model}")
     print(f"Owner lock: {sorted(get_owner_ids())}")
     print("------")
     try:
@@ -780,16 +873,16 @@ async def celestial_cmd(ctx: commands.Context):
     )
     embed.add_field(
         name="🔒 Owner toolkit",
-        value="`!nick` · `!ainick` · `!timeout` · `!untimeout` · `!slowmode` · `!lock` · `!unlock` · `!announce` · `!clear`",
+        value="`!nick` · `!ainick` · `!timeout` · `!untimeout` · `!slowmode` · `!lock` · `!unlock` · `!announce` · `!clear` · `!aishout` · `!notify` · `!teach` · `!remind` · `!aicode` · `!applysetup`",
         inline=False,
     )
     await ctx.send(embed=_pretty(embed))
 
 
-@bot.hybrid_command(name="ai", description="Ask Celestial anything")
+@bot.hybrid_command(name="ai", description="Ask Celestial anything (remembers you)")
 @commands.cooldown(rate=1, per=5.0, type=commands.BucketType.user)
 async def ai(ctx: commands.Context, *, prompt: str):
-    """Ask Celestial anything. Usage: !ai what is hello"""
+    """Ask Celestial anything. Remembers the conversation. Usage: !ai what is hello"""
     if need_key(ctx):
         await no_key_msg(ctx)
         return
@@ -797,18 +890,20 @@ async def ai(ctx: commands.Context, *, prompt: str):
         return
     if await _maybe_action(ctx, prompt):
         return
+    history = _get_history(ctx)
     async with ctx.typing():
-        reply = await _run_ai(ctx, prompt)
+        reply = await _run_ai(ctx, prompt, history=list(history))
     if not reply:
         await ctx.send("The model returned an empty reply. Try rephrasing.")
         return
+    _remember(ctx, prompt, reply)
     await send_long(ctx, reply)
 
 
 @bot.hybrid_command(name="chat", description="Chat with Celestial (she remembers)")
 @commands.cooldown(rate=1, per=5.0, type=commands.BucketType.user)
 async def chat(ctx: commands.Context, *, msg: str):
-    """Chat with Celestial - she remembers the last 8 turns. Usage: !chat hi!"""
+    """Chat with Celestial - same shared memory as !ai. Usage: !chat hi!"""
     if need_key(ctx):
         await no_key_msg(ctx)
         return
@@ -816,24 +911,20 @@ async def chat(ctx: commands.Context, *, msg: str):
         return
     if await _maybe_action(ctx, msg):
         return
-    guild_id = ctx.guild.id if ctx.guild else 0
-    key = (guild_id, ctx.author.id)
-    history = chat_history.setdefault(key, deque(maxlen=8))
+    history = _get_history(ctx)
     async with ctx.typing():
         reply = await _run_ai(ctx, msg, history=list(history))
     if not reply:
         await ctx.send("The model returned an empty reply. Try rephrasing.")
         return
-    history.append({"role": "user", "content": msg})
-    history.append({"role": "assistant", "content": reply[:1500]})
+    _remember(ctx, msg, reply)
     await send_long(ctx, reply)
 
 
 @bot.hybrid_command(name="forget", description="Clear Celestial's chat memory")
 async def forget(ctx: commands.Context):
     """Clear Celestial's memory of you. Usage: !forget"""
-    guild_id = ctx.guild.id if ctx.guild else 0
-    chat_history.pop((guild_id, ctx.author.id), None)
+    chat_history.pop(_history_key(ctx), None)
     await ctx.send("Memory cleared. Fresh start! ✨")
 
 
@@ -1238,6 +1329,191 @@ async def teachmode_cmd(ctx: commands.Context, mode: str = ""):
         await ctx.send(f"Currently: **{cur}**. Usage: `!teachmode me` or `!teachmode everyone`.")
 
 
+# ------------------------------------------- staff applications + code builder
+# Which channel receives applications per guild. In-memory: re-run !applysetup
+# after a restart/redeploy.
+apply_config: dict = {}
+
+
+class StaffApplyModal(discord.ui.Modal, title="Staff Application"):
+    name = discord.ui.TextInput(label="Your name / age", placeholder="e.g. Alex, 19", max_length=100)
+    why = discord.ui.TextInput(label="Why do you want to be staff?",
+                               style=discord.TextStyle.paragraph, max_length=1000)
+    exp = discord.ui.TextInput(label="Past experience?", style=discord.TextStyle.paragraph,
+                               required=False, max_length=1000)
+    avail = discord.ui.TextInput(label="Availability / timezone", placeholder="e.g. weekends, GMT+1",
+                                 max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid = interaction.guild.id if interaction.guild else 0
+        cfg = apply_config.get(gid)
+        if not cfg:
+            await interaction.response.send_message("Applications aren't open right now.", ephemeral=True)
+            return
+        ch = interaction.guild.get_channel(cfg["channel_id"]) if interaction.guild else None
+        if ch is None:
+            await interaction.response.send_message("The application channel is gone - tell the owner.", ephemeral=True)
+            return
+        embed = discord.Embed(title=f"📝 Staff application from {interaction.user.display_name}",
+                              color=0x9B59B6)
+        try:
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        except Exception:
+            pass
+        embed.add_field(name="Name / Age", value=self.name.value[:500], inline=False)
+        embed.add_field(name="Why staff?", value=self.why.value[:1000], inline=False)
+        if (self.exp.value or "").strip():
+            embed.add_field(name="Experience", value=self.exp.value[:1000], inline=False)
+        embed.add_field(name="Availability", value=self.avail.value[:300], inline=False)
+        try:
+            await ch.send(embed=_pretty(embed), view=DecideView(interaction.user.id))
+        except discord.Forbidden:
+            await interaction.response.send_message("I can't post there - tell the owner.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message("Couldn't submit - try again.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ Application received! Staff will review it.", ephemeral=True)
+
+
+class ApplyPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📝 Apply for Staff", style=discord.ButtonStyle.blurple,
+                       custom_id="celestial:apply")
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild.id if interaction.guild else 0
+        if gid not in apply_config:
+            await interaction.response.send_message("Applications aren't open right now.", ephemeral=True)
+            return
+        await interaction.response.send_modal(StaffApplyModal())
+
+
+class DecideView(discord.ui.View):
+    def __init__(self, applicant_id: int):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+
+    async def _gate(self, interaction: discord.Interaction) -> bool:
+        u = interaction.user
+        if u.id in get_owner_ids():
+            return True
+        if interaction.guild and (u.guild_permissions.administrator
+                                  or interaction.guild.owner_id == u.id):
+            return True
+        return False
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.green, custom_id="celestial:accept")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._decide(interaction, True)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.red, custom_id="celestial:deny")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._decide(interaction, False)
+
+    async def _decide(self, interaction: discord.Interaction, accepted: bool):
+        if not await self._gate(interaction):
+            await interaction.response.send_message("🔒 Owner only.", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=self)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        verdict = "accepted ✅" if accepted else "denied ❌"
+        try:
+            member = None
+            if interaction.guild:
+                try:
+                    member = interaction.guild.get_member(self.applicant_id)
+                    if member is None:
+                        member = await interaction.guild.fetch_member(self.applicant_id)
+                except (discord.NotFound, discord.HTTPException):
+                    member = None
+            if member is not None:
+                await member.send(f"{'🎉 Your staff application was **accepted**!' if accepted else '❌ Your staff application was **denied** this time.'}")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await interaction.response.send_message(f"Applicant {verdict}.", ephemeral=True)
+
+
+@bot.hybrid_command(name="applysetup", description="Open staff applications (owner only)")
+@check_privileged()
+async def applysetup_cmd(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Open staff applications. Usage: !applysetup [#channel]"""
+    if ctx.guild is None:
+        await ctx.send("Use this in a server.")
+        return
+    target = channel or ctx.channel
+    apply_config[ctx.guild.id] = {"channel_id": target.id}
+    embed = discord.Embed(
+        title="📝 Staff Applications",
+        description=("Want to join the staff team? Click the button below and fill in the form.\n"
+                     "Anyone can apply - only the owner reviews."),
+        color=0x9B59B6,
+    )
+    try:
+        await target.send(embed=_pretty(embed), view=ApplyPanelView())
+    except discord.Forbidden:
+        await ctx.send(f"I can't post in {target.mention}.")
+        return
+    except discord.HTTPException as e:
+        await ctx.send(f"Discord refused that: {e}")
+        return
+    if target.id != ctx.channel.id:
+        await ctx.send(f"✅ Applications open in {target.mention}.")
+
+
+@bot.hybrid_command(name="aicode", description="Have Celestial write code for you (owner only)")
+@check_privileged()
+@commands.cooldown(rate=1, per=60.0, type=commands.BucketType.user)
+async def aicode_cmd(ctx: commands.Context, *, request: str):
+    """Generate discord.py code. Usage: !aicode staff application with buttons"""
+    if need_key(ctx):
+        await no_key_msg(ctx)
+        return
+    request = request.strip()
+    if len(request) < 5:
+        await ctx.send("Usage: `!aicode <describe what to build>`")
+        return
+    messages = [
+        {"role": "system", "content": CODE_SYSTEM_PROMPT + " Live context: " + server_context(ctx)},
+        {"role": "user", "content": request},
+    ]
+    async with ctx.typing():
+        async with aiohttp.ClientSession() as session:
+            status, payload = await post_chat(session, messages, anon_id(ctx.author.id),
+                                              max_tokens=2500, temperature=0.3)
+    if status != 200:
+        await ctx.send(error_message(status, payload))
+        return
+    raw = (extract_reply(payload) or "").strip()
+    if not raw:
+        await ctx.send("The model returned an empty reply. Try again.")
+        return
+    code, expl = None, raw
+    m = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL | re.IGNORECASE)
+    if m:
+        code = m.group(1).strip()
+        expl = (raw[:m.start()] + raw[m.end():]).strip()
+    slug = re.sub(r"\W+", "_", request.lower()).strip("_")[:30] or "code"
+    try:
+        await ctx.send(
+            "🧑‍💻 Here's your code:" if code else "Couldn't isolate a code block - full reply as file:",
+            file=discord.File(io.BytesIO((code or raw).encode("utf-8", "ignore")),
+                              filename=f"celestial_{slug}.py"),
+        )
+    except discord.HTTPException:
+        await ctx.send("Couldn't attach the file - here's the reply in chat:")
+        await send_long(ctx, raw[:6000])
+        return
+    if expl:
+        await send_long(ctx, expl[:3000])
+
+
 # ------------------------------------------------------- owner toolkit
 @bot.hybrid_command(name="nick", description="Rename a member (owner only)")
 @check_privileged()
@@ -1549,15 +1825,20 @@ async def setavatar_cmd(ctx: commands.Context, image: discord.Attachment = None)
     await ctx.send("✅ Profile picture updated!")
 
 
-@bot.hybrid_command(name="model", description="Show or change the AI model")
+@bot.hybrid_command(name="model", description="Show or change AI models")
 async def model(ctx: commands.Context, *, new_model: str = None):
-    """Show or change the AI model (until restart)."""
-    global current_model
+    """Show models. Usage: !model | !model <groq-id> | !model openrouter <id>"""
+    global current_model, groq_model
     if new_model is None:
-        await ctx.send(f"Current model: `{current_model}`")
+        await ctx.send(f"Primary (Groq): `{groq_model}`\nFallback (OpenRouter): `{current_model}`")
         return
-    current_model = new_model
-    await ctx.send(f"Model set to `{current_model}` (resets on restart).")
+    parts = new_model.split(None, 1)
+    if parts[0].lower() == "openrouter" and len(parts) == 2:
+        current_model = parts[1].strip()
+        await ctx.send(f"OpenRouter fallback set to `{current_model}` (resets on restart).")
+    else:
+        groq_model = new_model.strip()
+        await ctx.send(f"Groq primary set to `{groq_model}` (resets on restart).")
 
 
 @model.error
@@ -1603,6 +1884,14 @@ async def aishout_error(ctx: commands.Context, error: commands.CommandError):
         await ctx.send(f"Slow down - try again in {error.retry_after:.0f}s.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: `!aishout [#channel] <your announcement draft>`")
+
+
+@aicode_cmd.error
+async def aicode_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"Slow down - try again in {error.retry_after:.0f}s.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `!aicode <describe what to build>`")
 
 
 @bot.event

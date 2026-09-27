@@ -1,14 +1,14 @@
 # Celestial Bot
 
-Celestial — a Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via [OpenRouter](https://openrouter.ai).
+Celestial — a Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via **Groq** (primary, free: 30/min · 1000/day) with **OpenRouter** as automatic fallback.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `!celestial` | Who Celestial is + command list |
-| `!ai <question>` | One-shot AI answer (server-aware) |
-| `!chat <msg>` | Conversation (remembers last 8 turns) |
+| `!ai <question>` | Ask anything (remembers the conversation) |
+| `!chat <msg>` | Same shared memory — use either one |
 | `!forget` | Clear chat memory |
 | `!aiembed <idea>` | AI designs an embed for you |
 | `!embed Title \| text \| #color` | Build an embed yourself |
@@ -21,8 +21,12 @@ Celestial — a Discord bot written in Python with [discord.py](https://discordp
 | `!teachmode me` / `!teachmode everyone` | Who triggers taught replies (default: only you) |
 | `!remind 10m text` | Reminder delivered by DM |
 | `!setavatar` + image | Change Celestial's profile picture |
+| `!aicode <request>` | She writes discord.py code, delivered as a file |
+| `!applysetup [#channel]` | Staff applications: button + form + accept/deny |
 | `!ping` / `!hello` / `!echo text` | Basics |
-| `!model [id]` | Show / switch AI model |
+| `!model` | Show both provider models |
+| `!model <groq-id>` | Switch Groq primary (e.g. `openai/gpt-oss-20b`) |
+| `!model openrouter <id>` | Switch OpenRouter fallback |
 
 Owner toolkit (needs `OWNER_ID`, see below):
 
@@ -48,8 +52,9 @@ Locked to you (`1341036065397411926`) automatically — no setup needed.
 Anyone else running a command gets `🔒 Only my owner can use that.`
 To add more owners: Render Dashboard → Environment → `OWNER_IDS=id1,id2` → redeploy.
 
-Note: taught replies (`!teach`) and keyword alerts (`!notify`) live in memory —
-a restart/redeploy clears them, so re-run those two commands after updates.
+Note: taught replies (`!teach`), keyword alerts (`!notify`) and chat memory
+(`!ai`/`!chat`, last ~8 exchanges) live in memory —
+a restart/redeploy clears them, so re-run those commands after updates.
 
 ## Hosting on Render + UptimeRobot
 

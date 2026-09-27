@@ -50,7 +50,9 @@ Render deploys from a Git repo. Easiest way (no git needed locally):
    | Key | Value |
    | --- | --- |
    | `DISCORD_TOKEN` | your bot token |
-   | `OPENROUTER_API_KEY` | your `sk-or-…` key |
+   | `GROQ_API_KEY` | free key from console.groq.com/keys (primary AI, 1000/day) |
+   | `GROQ_MODEL` | `qwen/qwen3.8-27b` |
+   | `OPENROUTER_API_KEY` | your `sk-or-…` key (automatic fallback, 50/day) |
    | `OPENROUTER_MODEL` | `openrouter/free` |
    | `OWNER_ID` | your Discord user id (locks every command to you) |
    | `PYTHON_VERSION` | `3.12.0` |

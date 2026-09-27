@@ -10,6 +10,10 @@ services:
         value: 3.12.0
       - key: DISCORD_TOKEN
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
