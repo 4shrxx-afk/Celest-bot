@@ -14,3 +14,5 @@ services:
         sync: false
       - key: OPENROUTER_MODEL
         value: openrouter/free
+      - key: OWNER_ID
+        sync: false

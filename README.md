@@ -1,19 +1,38 @@
 # Celestial Bot
 
-A Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via [OpenRouter](https://openrouter.ai).
+Celestial — a Discord bot written in Python with [discord.py](https://discordpy.readthedocs.io/) and AI replies via [OpenRouter](https://openrouter.ai).
 
 ## Commands
 
-| Command                     | Description                                |
-| --------------------------- | ------------------------------------------ |
-| `!ai what is hello`         | Ask the AI (free models by default)        |
-| `!model`                    | Show the current AI model                  |
-| `!model qwen/qwen3.8-27b:free` | Switch model for this run                |
-| `!ping`                     | Shows the bot's latency                    |
-| `!hello`                    | Says hello                                 |
-| `!echo text`                | Repeats the given text                     |
+| Command | Description |
+| --- | --- |
+| `!celestial` | Who Celestial is + command list |
+| `!ai <question>` | One-shot AI answer (server-aware) |
+| `!chat <msg>` | Conversation (remembers last 8 turns) |
+| `!forget` | Clear chat memory |
+| `!aiembed <idea>` | AI designs an embed for you |
+| `!embed Title \| text \| #color` | Build an embed yourself |
+| `!server` / `!user [@x]` / `!avatar [@x]` | Server + member info embeds |
+| `!summarize [5-30]` | Recap recent chat |
+| `!aishout [#channel] draft` | AI-polished @everyone announcement |
+| `!notify add hi, help` | DM you when keywords appear |
+| `!ping` / `!hello` / `!echo text` | Basics |
+| `!model [id]` | Show / switch AI model |
 
-`!ai` is limited to 1 use per 5 seconds per user.
+Owner toolkit (needs `OWNER_ID`, see below):
+
+`!nick @user NewName` · `!ainick @user <vibe>` · `!timeout @user 10m [reason]` ·
+`!untimeout @user` · `!slowmode <s|off>` · `!lock` / `!unlock` ·
+`!announce #channel Title \| text` · `!clear <1-30>` · `!aishout [#channel] draft` · `!notify add hi, help`
+
+## Lock it to yourself
+
+1. Discord → Settings → Advanced → enable **Developer Mode**.
+2. Right-click your profile → **Copy User ID**.
+3. Render Dashboard → Environment → add `OWNER_ID` = that id → redeploy.
+4. Anyone else running a command now gets `🔒 Only my owner can use that.`
+
+No `OWNER_ID` = party mode (anyone can use it, moderation falls back to server admins only).
 
 ## Hosting on Render + UptimeRobot
 
@@ -22,17 +41,25 @@ Short version:
 
 1. Upload `bot.py`, `requirements.txt`, `render.yaml` to GitHub (no `.env`).
 2. Render → New Web Service → connect the repo (Free plan).
-3. Dashboard → Environment → set `DISCORD_TOKEN`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`.
+3. Dashboard → Environment → `DISCORD_TOKEN`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`, `OWNER_ID`.
 4. UptimeRobot → HTTP(s) monitor on your Render URL, every 5 min.
-5. Test with `!ping` and `!ai what is hello`.
+5. Test with `!ping` and `!ai who are you`.
 
 The bot runs a tiny keep-alive web page on `$PORT` (stdlib only, no extra
 deps) so Render's port check passes and UptimeRobot has something to ping.
+
+## Permissions the bot needs
+
+Re-invite via Developer Portal → OAuth2 → URL Generator (`bot` scope) with:
+**Send Messages, Embed Links, Read Message History, Mention Everyone,
+Manage Nicknames, Moderate Members, Manage Messages, Manage Channels.**
+Put its role above anyone it should rename/timeout (it can never touch the server owner).
+Portal → Bot → enable **Message Content Intent** + **Server Members Intent**.
 
 ## Security notes
 
 - Secrets live in Render's **Environment** tab (or local `.env`) — never in `bot.py`.
 - `.env` is gitignored — do not commit it.
-- The bot only sends a **SHA-256 hash** of a user's Discord ID to OpenRouter, never the raw ID.
+- Only a **SHA-256 hash** of a user's Discord ID is sent to OpenRouter, never the raw ID. `OWNER_ID` never leaves Render.
 - Never paste your bot token or API key into Discord messages, tickets, or a public repo.
 - If a token ever leaks: **Reset Token** in the Developer Portal — old copies die instantly.

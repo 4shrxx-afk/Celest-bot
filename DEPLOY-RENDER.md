@@ -8,8 +8,13 @@ never idles out. No extra files or deps needed (stdlib only).
 ## 1. Get your two secrets (never paste them anywhere)
 
 1. Bot token: <https://discord.com/developers/applications> → your app →
-   **Bot → Reset Token** → copy. Also enable **Message Content Intent**.
+   **Bot → Reset Token** → copy. Enable **Message Content Intent** AND
+   **Server Members Intent** (Privileged Intent, needed for renames/member info).
 2. AI key: <https://openrouter.ai/keys> → Create Key → copy (`sk-or-…`).
+3. Re-invite the bot if needed (OAuth2 → URL Generator, `bot` scope) with:
+   **Send Messages, Embed Links, Read Message History, Mention Everyone,
+   Manage Nicknames, Moderate Members, Manage Messages, Manage Channels.**
+   Drag its role above members it should manage (it can never touch the server owner).
 
 ⚠️ These are passwords. Never send them in Discord, never commit them,
 never paste them to anyone (including me).
@@ -47,7 +52,11 @@ Render deploys from a Git repo. Easiest way (no git needed locally):
    | `DISCORD_TOKEN` | your bot token |
    | `OPENROUTER_API_KEY` | your `sk-or-…` key |
    | `OPENROUTER_MODEL` | `openrouter/free` |
+   | `OWNER_ID` | your Discord user id (locks every command to you) |
    | `PYTHON_VERSION` | `3.12.0` |
+
+   Get your id: Discord → Settings → Advanced → **Developer Mode** → right-click
+   your profile → **Copy User ID**. No `OWNER_ID` = anyone can use the bot.
 
 5. **Create Web Service**. Watch **Logs** — you should see:
 
