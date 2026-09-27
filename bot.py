@@ -1933,4 +1933,18 @@ async def _tree_error(interaction: discord.Interaction, error: app_commands.AppC
         pass
 
 
-bot.run(TOKEN, log_handler=None)
+try:
+    bot.run(TOKEN, log_handler=None)
+except discord.errors.HTTPException as e:
+    if getattr(e, "status", None) == 429:
+        # Discord global rate limit on login (restart loops or a second instance
+        # using the same token). Sleep before exiting so Render doesn't hot-loop
+        # logins and extend the block.
+        print("Discord login rate-limited (temporary block). Sleeping 10 minutes before retry.", flush=True)
+        time.sleep(600)
+    raise
+except discord.errors.LoginFailure:
+    # Wrong token: pause briefly so a bad token doesn't hammer Discord either.
+    print("Login failed: improper token. Sleeping 60s before exit.", flush=True)
+    time.sleep(60)
+    raise
