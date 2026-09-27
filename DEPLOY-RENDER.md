@@ -56,7 +56,8 @@ Render deploys from a Git repo. Easiest way (no git needed locally):
    | `PYTHON_VERSION` | `3.12.0` |
 
    Get your id: Discord → Settings → Advanced → **Developer Mode** → right-click
-   your profile → **Copy User ID**. No `OWNER_ID` = anyone can use the bot.
+   your profile → **Copy User ID**. The bot is locked to you by default;
+   `OWNER_ID` only adds extra owners.
 
 5. **Create Web Service**. Watch **Logs** — you should see:
 

@@ -16,6 +16,11 @@ Celestial — a Discord bot written in Python with [discord.py](https://discordp
 | `!summarize [5-30]` | Recap recent chat |
 | `!aishout [#channel] draft` | AI-polished @everyone announcement |
 | `!notify add hi, help` | DM you when keywords appear |
+| `!teach trigger \| reply` | Teach a custom auto-reply (`{user}`, `{server}` work) |
+| `!unteach trigger` / `!teachlist` | Remove / list taught replies |
+| `!teachmode me` / `!teachmode everyone` | Who triggers taught replies (default: only you) |
+| `!remind 10m text` | Reminder delivered by DM |
+| `!setavatar` + image | Change Celestial's profile picture |
 | `!ping` / `!hello` / `!echo text` | Basics |
 | `!model [id]` | Show / switch AI model |
 
@@ -23,16 +28,28 @@ Owner toolkit (needs `OWNER_ID`, see below):
 
 `!nick @user NewName` · `!ainick @user <vibe>` · `!timeout @user 10m [reason]` ·
 `!untimeout @user` · `!slowmode <s|off>` · `!lock` / `!unlock` ·
-`!announce #channel Title \| text` · `!clear <1-30>` · `!aishout [#channel] draft` · `!notify add hi, help`
+`!announce #channel Title \| text` · `!clear <1-30>` · `!aishout [#channel] draft` · `!notify add hi, help` ·
+`!teach trigger \| reply` · `!remind 10m text` · `!setavatar` (with attached image)
+
+Every command also works as a **/slash command** (type `/` in Discord).
+Slash commands can take up to ~1 hour to appear after the first sync.
+
+You can also just talk: `!ai rename @John to JD`, `!ai timeout @Sam 10m spam`,
+`!ai shout game night friday`, `!ai make an embed about movie night`,
+`!ai remind me in 10 minutes to check the oven`, `!ai summarize`.
+Celestial does it herself (deletes still need the explicit `!clear`).
+
+Attach an image to the same message as `!ai` / `!chat` and Celestial will look at it
+(if the model supports vision — otherwise she answers text-only and says so).
 
 ## Lock it to yourself
 
-1. Discord → Settings → Advanced → enable **Developer Mode**.
-2. Right-click your profile → **Copy User ID**.
-3. Render Dashboard → Environment → add `OWNER_ID` = that id → redeploy.
-4. Anyone else running a command now gets `🔒 Only my owner can use that.`
+Locked to you (`1341036065397411926`) automatically — no setup needed.
+Anyone else running a command gets `🔒 Only my owner can use that.`
+To add more owners: Render Dashboard → Environment → `OWNER_IDS=id1,id2` → redeploy.
 
-No `OWNER_ID` = party mode (anyone can use it, moderation falls back to server admins only).
+Note: taught replies (`!teach`) and keyword alerts (`!notify`) live in memory —
+a restart/redeploy clears them, so re-run those two commands after updates.
 
 ## Hosting on Render + UptimeRobot
 
